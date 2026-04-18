@@ -1,0 +1,374 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  ML Infra Info — self-contained stack.
+  Provisions VPC, EC2, ALB, and deploys the info-app Docker container.
+  HTTP by default; provide CertificateArn for HTTPS.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: General
+        Parameters: [StackPrefix, KeyPairName, AllowedSSHCidr, AllowedWebCidr]
+      - Label:
+          default: App
+        Parameters: [S3Bucket, AppPort]
+      - Label:
+          default: HTTPS (optional)
+        Parameters: [CertificateArn]
+
+Parameters:
+  StackPrefix:
+    Type: String
+    Default: ml-infra
+    Description: Prefix for all resource names
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 key pair for SSH access
+
+  AllowedSSHCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to SSH (use YOUR_IP/32 for security)
+
+  AllowedWebCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: >
+      CIDR allowed to access the web app via ALB.
+      Restrict to YOUR_IP/32 or your corporate CIDR to avoid DyePack auto-remediation.
+      (AWS internal accounts: open endpoints without auth trigger automatic shutdown)
+
+  S3Bucket:
+    Type: String
+    Description: S3 bucket containing info-app/ directory (Dockerfile, main.py, templates/)
+
+  AppPort:
+    Type: Number
+    Default: 8000
+    Description: Port the info-app listens on inside Docker
+
+  CertificateArn:
+    Type: String
+    Default: ''
+    Description: ACM certificate ARN for HTTPS (leave empty for HTTP only)
+
+Conditions:
+  HasCert: !Not [!Equals [!Ref CertificateArn, '']]
+
+Mappings:
+  Network:
+    VPC:
+      CIDR: 10.0.0.0/16
+      Public1: 10.0.1.0/24
+      Public2: 10.0.2.0/24
+
+Resources:
+
+  # ── VPC ──────────────────────────────────────────────────────────────────────
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap [Network, VPC, CIDR]
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{Key: Name, Value: !Sub '${StackPrefix}-vpc'}]
+
+  IGW:
+    Type: AWS::EC2::InternetGateway
+
+  IGWAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref IGW
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !FindInMap [Network, VPC, Public1]
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags: [{Key: Name, Value: !Sub '${StackPrefix}-pub-1'}]
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !FindInMap [Network, VPC, Public2]
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags: [{Key: Name, Value: !Sub '${StackPrefix}-pub-2'}]
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttach
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IGW
+
+  SubnetAssoc1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref RouteTable
+
+  SubnetAssoc2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref RouteTable
+
+  # ── Security Groups ──────────────────────────────────────────────────────────
+  ALBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB — allow HTTP and HTTPS from AllowedWebCidr
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref AllowedWebCidr
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref AllowedWebCidr
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  InstanceSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EC2 instance — SSH + app port from ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedSSHCidr
+        - IpProtocol: tcp
+          FromPort: !Ref AppPort
+          ToPort: !Ref AppPort
+          SourceSecurityGroupId: !Ref ALBSG
+          Description: App port from ALB
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !FindInMap [Network, VPC, CIDR]
+          Description: HTTPS for VPC endpoints (SSM, S3)
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # ── IAM ──────────────────────────────────────────────────────────────────────
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${StackPrefix}-instance-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: AppPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3Bucket}'
+                  - !Sub 'arn:aws:s3:::${S3Bucket}/*'
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeImages
+                  - ssm:GetParameter
+                  - ssm:GetParametersByPath
+                Resource: '*'
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  # ── VPC Endpoints (required when outbound internet is blocked by security scanner) ──
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds: [!Ref RouteTable]
+
+  SSMEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssm
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PublicSubnet1]
+      SecurityGroupIds: [!Ref InstanceSG]
+      PrivateDnsEnabled: true
+
+  SSMMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssmmessages
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PublicSubnet1]
+      SecurityGroupIds: [!Ref InstanceSG]
+      PrivateDnsEnabled: true
+
+  EC2MessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ec2messages
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PublicSubnet1]
+      SecurityGroupIds: [!Ref InstanceSG]
+      PrivateDnsEnabled: true
+
+  # ── EC2 ──────────────────────────────────────────────────────────────────────
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.medium
+      ImageId: '{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp3/ami-id}}'
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref InstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubnet1
+          GroupSet: [!Ref InstanceSG]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${StackPrefix}-app'
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+
+          # Docker
+          apt-get update -qq
+          apt-get install -y docker.io unzip curl -qq
+          systemctl enable --now docker
+
+          # AWS CLI v2
+          curl -s https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
+          cd /tmp && unzip -q awscliv2.zip && ./aws/install
+
+          # Deploy info-app
+          mkdir -p /home/ubuntu/info-app/templates
+          /usr/local/bin/aws s3 sync s3://${S3Bucket}/info-app/ \
+            /home/ubuntu/info-app/ --region ${AWS::Region}
+          cd /home/ubuntu/info-app
+          docker build -t info-app:latest .
+          docker run -d --name info-app --restart unless-stopped \
+            -p ${AppPort}:${AppPort} \
+            -e AWS_DEFAULT_REGION=${AWS::Region} \
+            info-app:latest
+
+          echo "info-app deployed"
+
+  # ── ALB ──────────────────────────────────────────────────────────────────────
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${StackPrefix}-alb'
+      Type: application
+      Scheme: internet-facing
+      Subnets: [!Ref PublicSubnet1, !Ref PublicSubnet2]
+      SecurityGroups: [!Ref ALBSG]
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${StackPrefix}-tg'
+      Protocol: HTTP
+      Port: !Ref AppPort
+      VpcId: !Ref VPC
+      TargetType: instance
+      Targets:
+        - Id: !Ref Instance
+          Port: !Ref AppPort
+      HealthCheckPath: /info/
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  # HTTP listener: forward (no cert) or redirect to HTTPS (with cert)
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - !If
+          - HasCert
+          - Type: redirect
+            RedirectConfig:
+              Protocol: HTTPS
+              Port: '443'
+              StatusCode: HTTP_301
+          - Type: forward
+            TargetGroupArn: !Ref TargetGroup
+
+  # HTTPS listener (only created when CertificateArn is provided)
+  HTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasCert
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Protocol: HTTPS
+      Port: 443
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+Outputs:
+  AppURL:
+    Value: !Sub
+      - '${Protocol}://${DNS}/info/'
+      - Protocol: !If [HasCert, https, http]
+        DNS: !GetAtt ALB.DNSName
+    Description: Info app URL (point your domain CNAME here if using custom domain)
+
+  ALBDNSName:
+    Value: !GetAtt ALB.DNSName
+    Description: ALB DNS name — use as CNAME target for custom domain
+
+  InstanceId:
+    Value: !Ref Instance
+
+  SSHCommand:
+    Value: !Sub 'ssh -i <your-key>.pem ubuntu@${Instance.PublicIp}'

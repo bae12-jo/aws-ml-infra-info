@@ -376,15 +376,24 @@ async def fetch_pcluster_versions(client: httpx.AsyncClient) -> list[dict]:
 # ── Compatibility check ───────────────────────────────────────────────────────
 def _resolve_ami(ami_id: str, region: str) -> dict:
     region = region.strip() or "us-east-1"
-    # Extract bare AMI ID if user pasted a label like "[dlami-...] ami-xxx" or "ami-xxx — description"
     m = re.search(r"(ami-[0-9a-f]+)", ami_id)
     ami_id = m.group(1) if m else ami_id.strip()
     if not ami_id:
         return {}
     ec2 = boto3.client("ec2", region_name=region)
-    images = ec2.describe_images(ImageIds=[ami_id])["Images"]
+    try:
+        images = ec2.describe_images(ImageIds=[ami_id])["Images"]
+    except ec2.exceptions.ClientError as e:
+        code = e.response["Error"]["Code"]
+        if code == "InvalidAMIID.NotFound":
+            return {"__error__": f"{ami_id} not found in {region}. Check the region — AMI IDs are region-specific."}
+        if code == "InvalidAMIID.Malformed":
+            return {"__error__": f"Invalid AMI ID format: {ami_id}"}
+        return {"__error__": str(e)}
+    except Exception as e:
+        return {"__error__": str(e)}
     if not images:
-        return {}
+        return {"__error__": f"{ami_id} not found in {region}. It may be private, deregistered, or belong to a different region."}
     img = images[0]
     name = img.get("Name", "")
     description = img.get("Description", "")
@@ -504,6 +513,9 @@ def check_compatibility(ami_id: str, container_image: str,
             ami_info = _resolve_ami(ami_id.strip(), region)
             if not ami_info:
                 result["warnings"].append(f"AMI {ami_id} not found in {region}.")
+            elif "__error__" in ami_info:
+                result["warnings"].append(ami_info["__error__"])
+                result["compatible"] = False
             else:
                 result["ami"] = ami_info
                 pc_ver = ami_info["tags"].get("parallelcluster:version")
@@ -708,8 +720,12 @@ async def api_dlc():
     return _cache["dlc"]
 
 @app.get("/api/dlami")
-async def api_dlami():
-    return _cache["dlami_groups"]
+async def api_dlami(region: str = "us-east-1"):
+    if region == "us-east-1":
+        return _cache["dlami_groups"]
+    # on-demand fetch for other regions
+    async with httpx.AsyncClient() as client:
+        return await fetch_dlami_versions_async(client, region=region)
 
 @app.get("/api/regions")
 async def api_regions(platform: str = "pcluster"):

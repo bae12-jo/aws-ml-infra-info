@@ -171,7 +171,7 @@ function showTab(group, category) {
             </div>
             <div class="form-group">
               <label>Region</label>
-              <select id="region-select" name="region" onchange="loadRecommendedAMIs()">
+              <select id="region-select" name="region" onchange="loadRecommendedAMIs(); updateDlamiForRegion(this.value)">
                 <option value="us-east-1">us-east-1</option>
               </select>
             </div>
@@ -425,6 +425,15 @@ function onPlatformChange() {
 // Initial load
 loadRegions('pcluster');
 
+function updateDlamiForRegion(region) {
+  if (region === 'us-east-1') return; // already cached
+  // Update recommended AMI dropdown DLAMI entries (for HyperPod platform)
+  var platform = document.getElementById('platform-select').value;
+  if (platform === 'hyperpod') {
+    loadRecommendedAMIs(); // already calls /api/recommended_amis with new region
+  }
+}
+
 function loadRecommendedAMIs() {
   var platform = document.getElementById('platform-select').value;
   var version  = document.getElementById('version-select').value;
@@ -663,13 +672,22 @@ function loadPcluterAMIs(region) {
 
       <!-- DLAMI -->
       <div>
-        <div class="sub-title" style="margin-bottom:10px">AWS DLAMI</div>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+          <div class="sub-title" style="margin-bottom:0">AWS DLAMI</div>
+          <select id="dlami-region-select" onchange="loadDlamiForRegion(this.value)"
+            style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:3px 8px;border-radius:5px;font-size:12px;outline:none">
+            {% for r in ["us-east-1","us-east-2","us-west-2","ap-northeast-1","ap-northeast-2","ap-southeast-1","ap-southeast-2","eu-west-1","eu-west-2","eu-central-1","ca-central-1","sa-east-1"] %}
+            <option value="{{ r }}">{{ r }}</option>
+            {% endfor %}
+          </select>
+        </div>
         <div style="color:var(--text2);font-size:11px;margin-bottom:10px">
           Pre-installed: framework + CUDA + NVIDIA Driver + EFA.<br>
           Recommended base for HyperPod and custom GPU clusters.
         </div>
+        <div id="dlami-content">
         {% if dlami_groups %}
-        <div class="tab-bar">
+        <div class="tab-bar" id="dlami-tab-bar">
           {% for category in dlami_groups.keys() %}
           <button class="tab tab-btn-dlami {% if loop.first %}active{% endif %}"
             id="tab-dlami-{{ category }}"
@@ -705,8 +723,57 @@ function loadPcluterAMIs(region) {
         {% else %}
         <div class="empty">Loading DLAMI data...</div>
         {% endif %}
+        </div><!-- /dlami-content -->
       </div>
     </div>
+
+<script>
+function renderDlamiGroups(groups) {
+  var content = document.getElementById('dlami-content');
+  if (!groups || Object.keys(groups).length === 0) {
+    content.innerHTML = '<div class="empty">No DLAMI data for this region</div>';
+    return;
+  }
+  var cats = Object.keys(groups);
+  var html = '<div class="tab-bar" id="dlami-tab-bar-dyn">';
+  cats.forEach(function(cat, i) {
+    html += '<button class="tab'+(i===0?' active':'')+'" onclick="showDlamiTab('+i+','+cats.length+')">'+cat+'</button>';
+  });
+  html += '</div>';
+  cats.forEach(function(cat, i) {
+    html += '<div class="ami-grid-col" id="dlami-dyn-'+i+'" style="display:'+(i===0?'flex':'none')+'">';
+    (groups[cat]||[]).forEach(function(d) {
+      html += '<div class="ami-card"><div class="ami-card-title">'+d.label+'</div>';
+      html += '<div class="ami-meta"><span>'+d.creation_date+'</span><code style="font-size:11px">'+d.ami_id+'</code></div>';
+      var sw = d.sw || {};
+      var sw_keys = Object.keys(sw).filter(function(k){ return k !== 'Supported' && k !== 'Kernel' && k !== 'OS' && k !== 'Container Toolkit'; });
+      if (sw_keys.length) {
+        html += '<div class="sw-grid">';
+        sw_keys.forEach(function(k){ html += '<div class="sw-item"><span class="sw-label">'+k+'</span><span class="sw-value">'+sw[k]+'</span></div>'; });
+        html += '</div>';
+      }
+      if (sw['Supported']) html += '<div style="margin-top:6px;color:var(--text2);font-size:11px">'+sw['Supported']+'</div>';
+      html += '</div>';
+    });
+    html += '</div>';
+  });
+  content.innerHTML = html;
+}
+function showDlamiTab(idx, total) {
+  for (var i=0; i<total; i++) {
+    var el=document.getElementById('dlami-dyn-'+i);
+    if(el) el.style.display = i===idx?'flex':'none';
+  }
+  document.querySelectorAll('#dlami-tab-bar-dyn .tab').forEach(function(t,i){ t.classList.toggle('active',i===idx); });
+}
+function loadDlamiForRegion(region) {
+  document.getElementById('dlami-content').innerHTML = '<div class="empty">Loading...</div>';
+  fetch('/info/api/dlami?region=' + encodeURIComponent(region))
+    .then(function(r){return r.json();})
+    .then(renderDlamiGroups)
+    .catch(function(){ document.getElementById('dlami-content').innerHTML = '<div class="empty">Failed to load</div>'; });
+}
+</script>
 
     <!-- Custom AMI Guide -->
     <div style="margin-top:20px;background:linear-gradient(135deg,#1a1d27,#21253a);border:1px solid var(--accent);border-radius:12px;padding:20px;position:relative;overflow:hidden">

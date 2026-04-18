@@ -376,6 +376,11 @@ async def fetch_pcluster_versions(client: httpx.AsyncClient) -> list[dict]:
 # ── Compatibility check ───────────────────────────────────────────────────────
 def _resolve_ami(ami_id: str, region: str) -> dict:
     region = region.strip() or "us-east-1"
+    # Extract bare AMI ID if user pasted a label like "[dlami-...] ami-xxx" or "ami-xxx — description"
+    m = re.search(r"(ami-[0-9a-f]+)", ami_id)
+    ami_id = m.group(1) if m else ami_id.strip()
+    if not ami_id:
+        return {}
     ec2 = boto3.client("ec2", region_name=region)
     images = ec2.describe_images(ImageIds=[ami_id])["Images"]
     if not images:

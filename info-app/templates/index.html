@@ -344,7 +344,7 @@ function runCheck(e) {
         if (!k.startsWith('__post__')) return false;
         var comp = k.replace('__post__','');
         if (comp === 'OFI NCCL') return !con_has_ofi_nccl;
-        if (comp === 'HyperPod agent') return ami_type === 'dlami_base';
+        if (comp === 'HyperPod agent') return ami_type === 'dlami_base' && selected_platform === 'hyperpod';
         if (comp === 'Slurm') return ami_type !== 'pcluster';
         // Lustre only relevant for training workloads
         var container_name = (d.container && d.container.name) ? d.container.name.toLowerCase() : '';

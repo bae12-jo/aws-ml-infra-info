@@ -238,7 +238,7 @@ DLAMI_PRIORITY_PATHS = [
     ("oss-nvidia-driver-gpu-pytorch-2.8-amazon-linux-2023", "PyTorch",    "PyTorch 2.8 AL2023",        "aws-deep-learning-x86-gpu-pytorch-2.8-amazon-linux-2023"),
     ("oss-nvidia-driver-gpu-tensorflow-2.18-ubuntu-22.04",  "TensorFlow", "TF 2.18 Ubuntu 22.04",      "aws-deep-learning-x86-gpu-tensorflow-2.18-ubuntu-22-04"),
     ("oss-nvidia-driver-gpu-tensorflow-2.18-amazon-linux-2023","TensorFlow","TF 2.18 AL2023",          "aws-deep-learning-x86-gpu-tensorflow-2.18-amazon-linux-2023"),
-    ("multi-framework-oss-nvidia-driver-amazon-linux-2",    "Multi",      "Multi-Framework AL2",       "aws-deep-learning-x86-multi-framework-al2"),
+    ("multi-framework-oss-nvidia-driver-amazon-linux-2",    "Multi",      "Multi-Framework AL2",       "aws-deep-learning-multiframework-ami-amazon-linux-2"),
 ]
 
 # Markdown table key → display label
